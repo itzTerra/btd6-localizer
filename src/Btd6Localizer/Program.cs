@@ -167,6 +167,132 @@ public static class Program
 
     private static void RunApply(string[] args)
     {
-        throw new NotImplementedException("Implemented in a later task.");
+        var argList = args.ToList();
+        var yes = argList.Remove("--yes");
+        var lang = ExtractFlagValue(argList, "--lang");
+        var positional = argList.ToArray();
+
+        var translationFile = positional.Length > 0
+            ? positional[0]
+            : PromptForExistingFilePath("Path to the translated XML file:");
+        var btd6Dir = positional.Length > 1
+            ? RequireExistingDirectory(positional[1], "BTD6 install directory")
+            : PromptForExistingDirectory("Path to the BTD6 install directory:");
+
+        if (!File.Exists(translationFile))
+        {
+            throw new Btd6LocalizerException($"File not found: '{translationFile}'.");
+        }
+
+        var translationXml = File.ReadAllText(translationFile);
+        if (!LocXml.TryParse(translationXml, out _, out var parseError))
+        {
+            throw new Btd6LocalizerException(
+                $"'{translationFile}' is not a valid LocData XML file: {parseError}");
+        }
+
+        var fullBundlePath = FindBundlePath(btd6Dir, "Full");
+        var halfBundlePath = TryFindBundlePath(btd6Dir, "Half");
+
+        var availableLanguages = BundleTool.ListLanguageNames(fullBundlePath);
+
+        if (lang is null || !availableLanguages.Contains(lang))
+        {
+            if (args.Length == 0 || !args.Contains("--lang"))
+            {
+                lang = AnsiConsole.Prompt(
+                    new SelectionPrompt<string>()
+                        .Title("Which language slot should be overwritten?")
+                        .AddChoices(availableLanguages));
+            }
+            else
+            {
+                throw new Btd6LocalizerException(
+                    $"'--lang {lang}' is not a valid language slot. Available: {string.Join(", ", availableLanguages)}");
+            }
+        }
+
+        var catalogPath = Path.Combine(btd6Dir, "StreamingAssets", "aa", "catalog.bin");
+        if (!File.Exists(catalogPath))
+        {
+            throw new Btd6LocalizerException($"catalog.bin not found at expected path: '{catalogPath}'.");
+        }
+
+        var bundlePaths = halfBundlePath is null
+            ? new[] { fullBundlePath }
+            : new[] { fullBundlePath, halfBundlePath };
+
+        AnsiConsole.MarkupLineInterpolated($"[yellow]About to overwrite language slot '{lang}' using '{translationFile}'.[/]");
+        foreach (var path in bundlePaths)
+        {
+            AnsiConsole.MarkupLineInterpolated($"  Bundle: {path} (backup: {path}.backup-<timestamp>)");
+        }
+        AnsiConsole.MarkupLineInterpolated($"  Catalog: {catalogPath} (backup: {catalogPath}.backup-<timestamp>)");
+
+        if (!yes && !AnsiConsole.Confirm("Proceed?"))
+        {
+            AnsiConsole.MarkupLine("[grey]Aborted.[/]");
+            return;
+        }
+
+        var stagingDir = Directory.CreateTempSubdirectory("btd6-localizer-").FullName;
+        try
+        {
+            var stagedBundlePaths = new List<(string Real, string Staged)>();
+            foreach (var realPath in bundlePaths)
+            {
+                var stagedPath = Path.Combine(stagingDir, Path.GetFileName(realPath));
+                BundleTool.ReplaceLanguage(realPath, stagedPath, lang!, translationXml);
+                stagedBundlePaths.Add((realPath, stagedPath));
+            }
+
+            var bundleFileNames = bundlePaths.Select(Path.GetFileName).ToHashSet(StringComparer.OrdinalIgnoreCase)!;
+            var stagedCatalogPath = Path.Combine(stagingDir, "catalog.bin");
+            CatalogTool.ZeroOutCrcForBundles(catalogPath, stagedCatalogPath, bundleFileNames!);
+
+            var timestamp = DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ");
+
+            foreach (var (realPath, stagedPath) in stagedBundlePaths)
+            {
+                File.Copy(realPath, $"{realPath}.backup-{timestamp}", overwrite: true);
+                File.Copy(stagedPath, realPath, overwrite: true);
+            }
+
+            File.Copy(catalogPath, $"{catalogPath}.backup-{timestamp}", overwrite: true);
+            File.Copy(stagedCatalogPath, catalogPath, overwrite: true);
+
+            AnsiConsole.MarkupLineInterpolated(
+                $"[green]Applied '{lang}' to {stagedBundlePaths.Count} bundle(s) and catalog.bin. Backups written with suffix '.backup-{timestamp}'.[/]");
+        }
+        finally
+        {
+            Directory.Delete(stagingDir, recursive: true);
+        }
+    }
+
+    private static string? ExtractFlagValue(List<string> args, string flagName)
+    {
+        var index = args.IndexOf(flagName);
+        if (index < 0 || index + 1 >= args.Count)
+        {
+            return null;
+        }
+
+        var value = args[index + 1];
+        args.RemoveAt(index + 1);
+        args.RemoveAt(index);
+        return value;
+    }
+
+    private static string? TryFindBundlePath(string btd6Dir, string variant)
+    {
+        try
+        {
+            return FindBundlePath(btd6Dir, variant);
+        }
+        catch (Btd6LocalizerException)
+        {
+            return null;
+        }
     }
 }
