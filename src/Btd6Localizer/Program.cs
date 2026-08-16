@@ -160,9 +160,24 @@ public static class Program
     {
         return AnsiConsole.Prompt(
             new TextPrompt<string>(promptText)
-                .Validate(path => Directory.Exists(path)
-                    ? ValidationResult.Success()
-                    : ValidationResult.Error("Directory does not exist. Try again.")));
+                .Validate(path =>
+                {
+                    if (!Directory.Exists(path))
+                    {
+                        return ValidationResult.Error("Directory does not exist. Try again.");
+                    }
+
+                    try
+                    {
+                        FindBundlePath(path, "Full");
+                    }
+                    catch (Btd6LocalizerException ex)
+                    {
+                        return ValidationResult.Error(ex.Message);
+                    }
+
+                    return ValidationResult.Success();
+                }));
     }
 
     private static void RunApply(string[] args)
